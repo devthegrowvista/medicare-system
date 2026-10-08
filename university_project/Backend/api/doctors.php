@@ -7,6 +7,7 @@
 
 require_once __DIR__ . '/../config/db.php';
 require_once __DIR__ . '/../config/auth.php';
+require_once __DIR__ . '/../config/mail.php';
 
 $database = new Database();
 $db = $database->getConnection();
@@ -32,15 +33,14 @@ switch ($method) {
 }
 
 function handleGet($db) {
-    // Require active login
     require_login();
 
     try {
         if (!empty($_GET['id'])) {
-            $stmt = $db->prepare("SELECT d.*, u.email, dept.name as department_name 
-                                  FROM doctors d 
-                                  INNER JOIN users u ON d.user_id = u.id 
-                                  LEFT JOIN departments dept ON d.department_id = dept.id 
+            $stmt = $db->prepare("SELECT d.*, u.email, dept.name as department
+                                  FROM doctors d
+                                  INNER JOIN users u ON d.user_id = u.id
+                                  LEFT JOIN departments dept ON d.department_id = dept.id
                                   WHERE d.id = :id LIMIT 1");
             $stmt->execute([':id' => $_GET['id']]);
             $doc = $stmt->fetch();
@@ -55,9 +55,9 @@ function handleGet($db) {
 
             json_response(200, $doc);
         } else {
-            $stmt = $db->query("SELECT d.*, u.email, dept.name as department 
-                                FROM doctors d 
-                                INNER JOIN users u ON d.user_id = u.id 
+            $stmt = $db->query("SELECT d.*, u.email, dept.name as department
+                                FROM doctors d
+                                INNER JOIN users u ON d.user_id = u.id
                                 LEFT JOIN departments dept ON d.department_id = dept.id
                                 ORDER BY d.name ASC");
             $doctors = [];
@@ -82,7 +82,7 @@ function handlePost($db) {
 
     $input = get_json_input();
     $name           = trim($input['name'] ?? '');
-    $email          = trim($input['email'] ?? '');
+    $email          = strtolower(trim($input['email'] ?? ''));
     $phone          = trim($input['phone'] ?? '');
     $specialization = trim($input['specialization'] ?? '');
     $department     = trim($input['department'] ?? '');
@@ -90,69 +90,87 @@ function handlePost($db) {
     $bio            = trim($input['bio'] ?? '');
     $availability   = $input['availability'] ?? ["Mon", "Wed", "Fri"];
     $timeSlots      = $input['timeSlots'] ?? ["09:00 AM", "11:00 AM", "02:00 PM"];
+    $adminPassword  = (string)($input['password'] ?? '');
 
-    if (empty($name) || empty($email) || empty($phone) || empty($specialization)) {
+    if ($name === '' || $email === '' || $phone === '' || $specialization === '') {
         json_response(400, ["success" => false, "message" => "Name, email, phone, and specialization are required."]);
     }
-
     if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
         json_response(400, ["success" => false, "message" => "Valid email address is required."]);
     }
+    if ($adminPassword !== '' && strlen($adminPassword) < 8) {
+        json_response(400, ["success" => false, "message" => "Password must be at least 8 characters."]);
+    }
+    if (!is_array($availability)) $availability = ["Mon", "Wed", "Fri"];
+    if (!is_array($timeSlots))    $timeSlots    = ["09:00 AM", "11:00 AM", "02:00 PM"];
 
     try {
-        $db->beginTransaction();
+        // Validate department before starting the transaction
+        $dept_id = null;
+        if ($department !== '') {
+            $d = $db->prepare("SELECT id FROM departments WHERE name = :d1 OR CAST(id AS CHAR) = :d2 LIMIT 1");
+            $d->execute([':d1' => $department, ':d2' => $department]);
+            $row = $d->fetch();
+            if (!$row) {
+                json_response(422, ["success" => false, "message" => "Selected department does not exist."]);
+            }
+            $dept_id = $row['id'];
+        }
 
-        // Check if email already registered
         $chk = $db->prepare("SELECT id FROM users WHERE email = :email LIMIT 1");
         $chk->execute([':email' => $email]);
         if ($chk->fetch()) {
-            $db->rollBack();
             json_response(409, ["success" => false, "message" => "A user with this email already exists."]);
         }
 
-        // 1. Create user account
-        $temp_password = $input['password'] ?? 'doctor123';
-        $pw_hash = password_hash($temp_password, PASSWORD_BCRYPT);
-        $u_stmt = $db->prepare("INSERT INTO users (email, password_hash, role) VALUES (:email, :hash, 'Doctor')");
-        $u_stmt->execute([':email' => $email, ':hash' => $pw_hash]);
+        $db->beginTransaction();
+
+        // If admin gave no password, create a random one; doctor sets own via email link
+        $generated = ($adminPassword === '');
+        $plain     = $generated ? bin2hex(random_bytes(16)) : $adminPassword;
+        $pw_hash   = password_hash($plain, PASSWORD_BCRYPT);
+
+        $u = $db->prepare("INSERT INTO users (email, password_hash, role) VALUES (:email, :hash, 'Doctor')");
+        $u->execute([':email' => $email, ':hash' => $pw_hash]);
         $user_id = $db->lastInsertId();
 
-        // 2. Resolve department_id
-        $dept_id = null;
-        if (!empty($department)) {
-            $d_stmt = $db->prepare("SELECT id FROM departments WHERE id = :d OR name = :d LIMIT 1");
-            $d_stmt->execute([':d' => $department]);
-            $d_row = $d_stmt->fetch();
-            $dept_id = $d_row['id'] ?? null;
-        }
-
-        // 3. Generate unique DOC-xxx ID
         $doc_id = generate_unique_id($db, 'doctors', 'DOC', 100, 999);
 
-        // 4. Insert doctor profile
-        $doc_stmt = $db->prepare("INSERT INTO doctors 
+        $ins = $db->prepare("INSERT INTO doctors
             (id, user_id, name, phone, specialization, department_id, availability, time_slots, room_no, status, bio, rating)
             VALUES (:id, :uid, :name, :phone, :spec, :dept_id, :avail, :slots, :room, 'Active', :bio, 4.8)");
-
-        $doc_stmt->execute([
+        $ins->execute([
             ':id'      => $doc_id,
             ':uid'     => $user_id,
             ':name'    => $name,
             ':phone'   => $phone,
             ':spec'    => $specialization,
             ':dept_id' => $dept_id,
-            ':avail'   => json_encode(is_array($availability) ? $availability : ["Mon", "Wed", "Fri"]),
-            ':slots'   => json_encode(is_array($timeSlots) ? $timeSlots : ["09:00 AM", "11:00 AM", "02:00 PM"]),
+            ':avail'   => json_encode($availability),
+            ':slots'   => json_encode($timeSlots),
             ':room'    => $roomNo,
             ':bio'     => $bio
         ]);
 
         $db->commit();
 
+        // After commit: invite email (doctor remains created even if mail fails)
+        $inviteSent = false;
+        if ($generated) {
+            $link = issue_reset_link($db, $email);
+            $safeName = htmlspecialchars($name, ENT_QUOTES, 'UTF-8');
+            $inviteSent = send_mail($email, 'Your Medicare doctor account',
+                "<p>Hello $safeName,</p>
+                 <p>An account has been created for you on Medicare Hospital System.</p>
+                 <p><a href=\"$link\">Click here to set your password</a> (valid for 30 minutes).</p>");
+        }
+
         json_response(201, [
             "success" => true,
-            "message" => "Doctor created successfully.",
+            "message" => "Doctor created successfully." .
+                ($generated && !$inviteSent ? " Invite email could not be sent; use 'Forgot password' for this doctor." : ""),
             "id" => $doc_id,
+            "inviteSent" => $inviteSent,
             "doctor" => [
                 "id"             => $doc_id,
                 "name"           => $name,
@@ -173,8 +191,11 @@ function handlePost($db) {
         if ($db->inTransaction()) {
             $db->rollBack();
         }
-        error_log("Create doctor error: " . $e->getMessage());
-        json_response(500, ["success" => false, "message" => "Database error while creating doctor."]);
+        error_log("Create doctor error: " . $e->getMessage() . " | line " . $e->getLine() . " | " . $e->getFile());
+        $msg = (defined('APP_DEBUG') && APP_DEBUG)
+            ? "DB error: " . $e->getMessage()
+            : "Database error while creating doctor.";
+        json_response(500, ["success" => false, "message" => $msg]);
     }
 }
 
@@ -216,15 +237,15 @@ function handlePut($db) {
         // Department handling
         $dept_id = $existing['department_id'];
         if (isset($input['department'])) {
-            $d_stmt = $db->prepare("SELECT id FROM departments WHERE id = :d OR name = :d LIMIT 1");
-            $d_stmt->execute([':d' => $input['department']]);
+            $d_stmt = $db->prepare("SELECT id FROM departments WHERE name = :d1 OR CAST(id AS CHAR) = :d2 LIMIT 1");
+            $d_stmt->execute([':d1' => $input['department'], ':d2' => $input['department']]);
             $d_row = $d_stmt->fetch();
             if ($d_row) {
                 $dept_id = $d_row['id'];
             }
         }
 
-        $upd = $db->prepare("UPDATE doctors SET 
+        $upd = $db->prepare("UPDATE doctors SET
             name = :name,
             phone = :phone,
             specialization = :spec,

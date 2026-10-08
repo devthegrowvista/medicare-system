@@ -2,29 +2,29 @@
  * Medicare System - Authentication & Password Recovery Modal
  *
  * Implements Session-based Login, Patient Self-Registration, and
- * 6-digit recovery-code password reset (XAMPP demo without SMTP).
+ * professional email-link password reset (secure token, 30 min expiry).
  */
-
-import React, { useState } from 'react';
-import { Shield, Users, Calendar, Activity, Key, Lock, Mail, Phone, MapPin, CheckCircle, AlertCircle, ArrowLeft } from 'lucide-react';
+ 
+import React, { useState, useEffect } from 'react';
+import { Shield, Users, Calendar, Activity, Lock, Mail, Phone, MapPin, CheckCircle, AlertCircle, ArrowLeft } from 'lucide-react';
 import { UserRole, Doctor, Patient } from '../types';
 import { authService } from '../apiService';
-
+ 
 interface AuthModalProps {
   doctors?: Doctor[];
   patients?: Patient[];
   onLoginSuccess: (role: UserRole, id: string, name: string) => void;
   onRegisterPatient?: (patientData: any) => Promise<void>;
 }
-
+ 
 export default function AuthModal({ onLoginSuccess }: AuthModalProps) {
-  const [authMode, setAuthMode] = useState<'login' | 'register' | 'forgot' | 'reset'>('login');
+  const [authMode, setAuthMode] = useState<'login' | 'register' | 'forgot' | 'sent' | 'reset'>('login');
   const [selectedRole, setSelectedRole] = useState<UserRole>('Patient');
-
+ 
   // Form states
   const [email, setEmail] = useState('sarah.connor@gmail.com');
   const [password, setPassword] = useState('patient123');
-
+ 
   // Registration states
   const [regName, setRegName] = useState('');
   const [regEmail, setRegEmail] = useState('');
@@ -34,19 +34,35 @@ export default function AuthModal({ onLoginSuccess }: AuthModalProps) {
   const [regDob, setRegDob] = useState('1995-06-15');
   const [regBloodGroup, setRegBloodGroup] = useState('O+');
   const [regAddress, setRegAddress] = useState('');
-
+ 
   // Password reset states
   const [forgotEmail, setForgotEmail] = useState('');
-  const [demoCode, setDemoCode] = useState('');
-  const [recoveryCode, setRecoveryCode] = useState('');
+  const [resetToken, setResetToken] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
-
+  const [cooldown, setCooldown] = useState(0);
+ 
   // Status feedback
   const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
-
+ 
+  // Open reset screen automatically when user arrives from the email link
+  useEffect(() => {
+    const t = new URLSearchParams(window.location.search).get('reset_token');
+    if (t && /^[a-f0-9]{64}$/.test(t)) {
+      setResetToken(t);
+      setAuthMode('reset');
+    }
+  }, []);
+ 
+  // Resend countdown timer
+  useEffect(() => {
+    if (cooldown <= 0) return;
+    const id = setTimeout(() => setCooldown((c) => c - 1), 1000);
+    return () => clearTimeout(id);
+  }, [cooldown]);
+ 
   // Quick preset loader for evaluation
   const setDemoCredentials = (role: UserRole) => {
     setSelectedRole(role);
@@ -63,13 +79,13 @@ export default function AuthModal({ onLoginSuccess }: AuthModalProps) {
       setPassword('patient123');
     }
   };
-
+ 
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoading(true);
     setErrorMsg(null);
     setSuccessMsg(null);
-
+ 
     try {
       const response = await authService.login(email.trim(), password.trim(), selectedRole);
       if (response.success && response.user) {
@@ -83,13 +99,13 @@ export default function AuthModal({ onLoginSuccess }: AuthModalProps) {
       setIsLoading(false);
     }
   };
-
+ 
   const handleRegisterSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoading(true);
     setErrorMsg(null);
     setSuccessMsg(null);
-
+ 
     try {
       const response = await authService.register({
         name: regName.trim(),
@@ -101,7 +117,7 @@ export default function AuthModal({ onLoginSuccess }: AuthModalProps) {
         bloodGroup: regBloodGroup,
         address: regAddress.trim(),
       });
-
+ 
       if (response.success && response.user) {
         setSuccessMsg('Account created successfully! Logging you in...');
         setTimeout(() => {
@@ -116,52 +132,54 @@ export default function AuthModal({ onLoginSuccess }: AuthModalProps) {
       setIsLoading(false);
     }
   };
-
-  const handleForgotSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+ 
+  const handleForgotSubmit = async (e?: React.FormEvent) => {
+    e?.preventDefault();
     setIsLoading(true);
     setErrorMsg(null);
     setSuccessMsg(null);
-
+ 
     try {
-      const res = await authService.forgotPassword(forgotEmail.trim());
-      if (res.success) {
-        setDemoCode(res.recovery_code || '');
-        setRecoveryCode('');
-        setNewPassword('');
-        setConfirmPassword('');
-        setSuccessMsg(res.message);
-        setAuthMode('reset');
-      } else {
-        setErrorMsg(res.message || 'Could not initiate reset.');
-      }
+      await authService.forgotPassword(forgotEmail.trim());
+      setAuthMode('sent');
+      setCooldown(60);
     } catch (err: any) {
-      setErrorMsg(err.message || 'Password reset request failed.');
+      setErrorMsg(err.message || 'Could not send reset link.');
     } finally {
       setIsLoading(false);
     }
   };
-
+ 
   const handleResetSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
     setSuccessMsg(null);
-
+ 
+    if (newPassword.length < 8) {
+      setErrorMsg('Password must be at least 8 characters.');
+      return;
+    }
     if (newPassword !== confirmPassword) {
       setErrorMsg('New password and confirm password do not match.');
       return;
     }
-
+ 
     setIsLoading(true);
-
+ 
     try {
-      const res = await authService.resetPassword(recoveryCode.trim(), newPassword.trim());
+      const res = await authService.resetPassword(resetToken, newPassword);
       if (res.success) {
         setSuccessMsg('Password updated successfully. You can now sign in.');
+        // Remove token from the URL
+        window.history.replaceState({}, '', window.location.pathname);
+        setResetToken('');
+        setNewPassword('');
+        setConfirmPassword('');
         setTimeout(() => {
           setAuthMode('login');
           setPassword('');
-        }, 1200);
+          setSuccessMsg(null);
+        }, 1500);
       } else {
         setErrorMsg(res.message || 'Failed to update password.');
       }
@@ -171,11 +189,11 @@ export default function AuthModal({ onLoginSuccess }: AuthModalProps) {
       setIsLoading(false);
     }
   };
-
+ 
   return (
     <div className="flex min-h-[82vh] items-center justify-center p-4">
       <div className="w-full max-w-xl overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xl shadow-slate-100">
-        
+ 
         {/* Header Banner */}
         <div className="bg-gradient-to-r from-blue-700 via-blue-600 to-indigo-700 p-6 text-white text-center">
           <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-2xl bg-white/10 backdrop-blur-md shadow-inner">
@@ -184,7 +202,7 @@ export default function AuthModal({ onLoginSuccess }: AuthModalProps) {
           <h2 className="text-2xl font-bold tracking-tight">Medicare Hospital System</h2>
           <p className="mt-1 text-xs text-blue-100 font-medium">Virtual University CS619 Final Project</p>
         </div>
-
+ 
         {/* Feedback banners */}
         {errorMsg && (
           <div className="mx-6 mt-4 flex items-center gap-2 rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs font-medium text-rose-800">
@@ -198,7 +216,7 @@ export default function AuthModal({ onLoginSuccess }: AuthModalProps) {
             <span>{successMsg}</span>
           </div>
         )}
-
+ 
         {/* ----------------- LOGIN MODE ----------------- */}
         {authMode === 'login' && (
           <div className="p-6">
@@ -241,13 +259,13 @@ export default function AuthModal({ onLoginSuccess }: AuthModalProps) {
                 Admin
               </button>
             </div>
-
+ 
             {/* Quick Helper for supervisor */}
             <div className="mb-5 flex items-center justify-between rounded-lg bg-blue-50/60 border border-blue-100 px-3 py-2 text-[11px] text-blue-800">
               <span className="font-medium">Active Role: {selectedRole}</span>
               <span className="text-blue-600 font-mono">Demo: {email} / {password}</span>
             </div>
-
+ 
             <form onSubmit={handleLoginSubmit} className="space-y-4">
               <div>
                 <label className="mb-1 block text-xs font-semibold text-slate-700">Email Address</label>
@@ -263,7 +281,7 @@ export default function AuthModal({ onLoginSuccess }: AuthModalProps) {
                   />
                 </div>
               </div>
-
+ 
               <div>
                 <div className="mb-1 flex items-center justify-between">
                   <label className="text-xs font-semibold text-slate-700">Password</label>
@@ -271,6 +289,7 @@ export default function AuthModal({ onLoginSuccess }: AuthModalProps) {
                     type="button"
                     onClick={() => {
                       setAuthMode('forgot');
+                      setForgotEmail(email);
                       setErrorMsg(null);
                       setSuccessMsg(null);
                     }}
@@ -291,7 +310,7 @@ export default function AuthModal({ onLoginSuccess }: AuthModalProps) {
                   />
                 </div>
               </div>
-
+ 
               <button
                 type="submit"
                 disabled={isLoading}
@@ -300,7 +319,7 @@ export default function AuthModal({ onLoginSuccess }: AuthModalProps) {
                 {isLoading ? 'Authenticating with XAMPP...' : `Sign in as ${selectedRole}`}
               </button>
             </form>
-
+ 
             {/* Switch to Register */}
             <div className="mt-6 border-t border-slate-100 pt-4 text-center">
               <p className="text-xs text-slate-500">
@@ -320,7 +339,7 @@ export default function AuthModal({ onLoginSuccess }: AuthModalProps) {
             </div>
           </div>
         )}
-
+ 
         {/* ----------------- PATIENT REGISTRATION MODE ----------------- */}
         {authMode === 'register' && (
           <div className="p-6">
@@ -337,7 +356,7 @@ export default function AuthModal({ onLoginSuccess }: AuthModalProps) {
               </button>
               <h3 className="text-sm font-bold text-slate-800">New Patient Registration</h3>
             </div>
-
+ 
             <form onSubmit={handleRegisterSubmit} className="space-y-3">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
@@ -363,7 +382,7 @@ export default function AuthModal({ onLoginSuccess }: AuthModalProps) {
                   />
                 </div>
               </div>
-
+ 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="mb-1 block text-xs font-semibold text-slate-700">Password</label>
@@ -392,7 +411,7 @@ export default function AuthModal({ onLoginSuccess }: AuthModalProps) {
                   </div>
                 </div>
               </div>
-
+ 
               <div className="grid grid-cols-3 gap-3">
                 <div>
                   <label className="mb-1 block text-xs font-semibold text-slate-700">Gender</label>
@@ -434,7 +453,7 @@ export default function AuthModal({ onLoginSuccess }: AuthModalProps) {
                   </select>
                 </div>
               </div>
-
+ 
               <div>
                 <label className="mb-1 block text-xs font-semibold text-slate-700">Residential Address</label>
                 <div className="relative">
@@ -448,7 +467,7 @@ export default function AuthModal({ onLoginSuccess }: AuthModalProps) {
                   />
                 </div>
               </div>
-
+ 
               <button
                 type="submit"
                 disabled={isLoading}
@@ -457,7 +476,7 @@ export default function AuthModal({ onLoginSuccess }: AuthModalProps) {
                 {isLoading ? 'Creating Account in Database...' : 'Register Patient Account'}
               </button>
             </form>
-
+ 
             <div className="mt-4 border-t border-slate-100 pt-3 text-center">
               <button
                 type="button"
@@ -469,25 +488,28 @@ export default function AuthModal({ onLoginSuccess }: AuthModalProps) {
             </div>
           </div>
         )}
-
+ 
         {/* ----------------- FORGOT PASSWORD STEP ----------------- */}
         {authMode === 'forgot' && (
           <div className="p-6">
             <div className="mb-4 flex items-center gap-2">
               <button
                 type="button"
-                onClick={() => setAuthMode('login')}
+                onClick={() => {
+                  setAuthMode('login');
+                  setErrorMsg(null);
+                }}
                 className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
               >
                 <ArrowLeft className="h-4 w-4" />
               </button>
               <h3 className="text-sm font-bold text-slate-800">Password Recovery</h3>
             </div>
-
+ 
             <p className="mb-4 text-xs text-slate-500">
-              Enter your registered email. A 6-digit recovery code will be issued. On XAMPP there is no SMTP mailbox, so the code is shown on the next screen for evaluation.
+              Enter the email linked to your account and we'll send you a link to reset your password.
             </p>
-
+ 
             <form onSubmit={handleForgotSubmit} className="space-y-4">
               <div>
                 <label className="mb-1 block text-xs font-semibold text-slate-700">Account Email</label>
@@ -503,65 +525,75 @@ export default function AuthModal({ onLoginSuccess }: AuthModalProps) {
                   />
                 </div>
               </div>
-
+ 
               <button
                 type="submit"
                 disabled={isLoading}
                 className="w-full rounded-xl bg-blue-600 py-2.5 text-xs font-bold text-white shadow-md shadow-blue-200 hover:bg-blue-700 transition-colors disabled:opacity-50"
               >
-                {isLoading ? 'Sending code...' : 'Send recovery code'}
+                {isLoading ? 'Sending...' : 'Send reset link'}
               </button>
             </form>
           </div>
         )}
-
+ 
+        {/* ----------------- CHECK YOUR EMAIL STEP ----------------- */}
+        {authMode === 'sent' && (
+          <div className="p-6 text-center">
+            <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-blue-50">
+              <Mail className="h-6 w-6 text-blue-600" />
+            </div>
+            <h3 className="text-sm font-bold text-slate-800">Check your email</h3>
+            <p className="mt-2 text-xs text-slate-500">
+              If an account exists for{' '}
+              <span className="font-semibold text-slate-700">{forgotEmail}</span>, we've sent a
+              password reset link. It expires in 30 minutes.
+            </p>
+            <button
+              type="button"
+              disabled={cooldown > 0 || isLoading}
+              onClick={() => handleForgotSubmit()}
+              className="mt-4 text-xs font-semibold text-blue-600 hover:underline disabled:text-slate-400 disabled:no-underline"
+            >
+              {cooldown > 0 ? `Resend email in ${cooldown}s` : 'Resend email'}
+            </button>
+            <div className="mt-4 border-t border-slate-100 pt-3">
+              <button
+                type="button"
+                onClick={() => {
+                  setAuthMode('login');
+                  setErrorMsg(null);
+                }}
+                className="text-xs font-semibold text-slate-500 hover:text-slate-800"
+              >
+                Back to sign in
+              </button>
+            </div>
+          </div>
+        )}
+ 
         {/* ----------------- RESET PASSWORD STEP ----------------- */}
         {authMode === 'reset' && (
           <div className="p-6">
             <div className="mb-4 flex items-center gap-2">
               <button
                 type="button"
-                onClick={() => setAuthMode('forgot')}
+                onClick={() => {
+                  setAuthMode('login');
+                  setErrorMsg(null);
+                }}
                 className="rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
               >
                 <ArrowLeft className="h-4 w-4" />
               </button>
               <h3 className="text-sm font-bold text-slate-800">Set new password</h3>
             </div>
-
-            {demoCode ? (
-              <div className="mb-4 rounded-xl border border-blue-200 bg-blue-50 p-3">
-                <p className="text-[11px] font-bold text-blue-900">Local XAMPP notice</p>
-                <p className="mt-1 text-[11px] text-blue-800">
-                  Email delivery is not available on XAMPP. Your 6-digit recovery code is:
-                </p>
-                <p className="mt-2 text-center font-mono text-2xl font-bold tracking-[0.35em] text-blue-900">{demoCode}</p>
-                <p className="mt-1 text-[10px] text-blue-600">Type this code below. It expires in 15 minutes.</p>
-              </div>
-            ) : (
-              <p className="mb-4 text-xs text-slate-500">
-                If that email is registered, enter the 6-digit recovery code and choose a new password.
-              </p>
-            )}
-
+ 
+            <p className="mb-4 text-xs text-slate-500">
+              Choose a new password for your account. Use at least 8 characters.
+            </p>
+ 
             <form onSubmit={handleResetSubmit} className="space-y-4">
-              <div>
-                <label className="mb-1 block text-xs font-semibold text-slate-700">Recovery code</label>
-                <div className="relative">
-                  <Key className="absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
-                  <input
-                    type="text"
-                    required
-                    inputMode="numeric"
-                    maxLength={6}
-                    value={recoveryCode}
-                    onChange={(e) => setRecoveryCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                    className="w-full rounded-xl border border-slate-200 bg-slate-50/50 py-2 pl-9 pr-3 text-xs font-mono tracking-[0.3em] text-slate-900 focus:border-blue-500 focus:bg-white focus:outline-none"
-                    placeholder="000000"
-                  />
-                </div>
-              </div>
-
               <div>
                 <label className="mb-1 block text-xs font-semibold text-slate-700">New password</label>
                 <div className="relative">
@@ -569,15 +601,15 @@ export default function AuthModal({ onLoginSuccess }: AuthModalProps) {
                   <input
                     type="password"
                     required
-                    minLength={6}
+                    minLength={8}
                     value={newPassword}
                     onChange={(e) => setNewPassword(e.target.value)}
                     className="w-full rounded-xl border border-slate-200 bg-slate-50/50 py-2 pl-9 pr-3 text-xs font-medium text-slate-900 focus:border-blue-500 focus:bg-white focus:outline-none"
-                    placeholder="Minimum 6 characters"
+                    placeholder="Minimum 8 characters"
                   />
                 </div>
               </div>
-
+ 
               <div>
                 <label className="mb-1 block text-xs font-semibold text-slate-700">Confirm new password</label>
                 <div className="relative">
@@ -585,7 +617,7 @@ export default function AuthModal({ onLoginSuccess }: AuthModalProps) {
                   <input
                     type="password"
                     required
-                    minLength={6}
+                    minLength={8}
                     value={confirmPassword}
                     onChange={(e) => setConfirmPassword(e.target.value)}
                     className="w-full rounded-xl border border-slate-200 bg-slate-50/50 py-2 pl-9 pr-3 text-xs font-medium text-slate-900 focus:border-blue-500 focus:bg-white focus:outline-none"
@@ -593,7 +625,7 @@ export default function AuthModal({ onLoginSuccess }: AuthModalProps) {
                   />
                 </div>
               </div>
-
+ 
               <button
                 type="submit"
                 disabled={isLoading}
@@ -604,8 +636,9 @@ export default function AuthModal({ onLoginSuccess }: AuthModalProps) {
             </form>
           </div>
         )}
-
+ 
       </div>
     </div>
   );
 }
+ 
