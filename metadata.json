@@ -1,0 +1,6 @@
+{
+  "name": "Medicare System",
+  "description": "A comprehensive digital hospital management platform providing automated patient registration, appointment booking, medical records handling, billing, and administrative reporting.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
