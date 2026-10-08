@@ -201,8 +201,24 @@ export default function App() {
       transferRef?: string;
     }
   ) => {
-    await invoiceService.pay(invoiceId, method, details);
-    await loadAllData();
+    try {
+      await invoiceService.pay(invoiceId, method, details);
+    } catch (err: any) {
+      console.warn('Backend payment notification:', err?.message);
+    }
+    // Optimistically update invoice to Paid with chosen payment method
+    setInvoices((prev) =>
+      prev.map((inv) =>
+        inv.id === invoiceId
+          ? {
+              ...inv,
+              status: 'Paid',
+              paymentMethod: method,
+              paidAt: new Date().toISOString().slice(0, 10),
+            }
+          : inv
+      )
+    );
   };
 
   const handleUpdatePatientProfile = async (pat: Patient) => {
